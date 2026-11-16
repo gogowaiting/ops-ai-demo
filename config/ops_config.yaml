@@ -1,6 +1,10 @@
 # 运维组件 API 统一配置（本文件集中管理所有外部组件接入参数）
 # 所有字段均可用环境变量覆盖，便于容器/CI 部署：
-#   OPS_TOOLS_MODE / PROMETHEUS_URL / LOKI_URL / KUBECONFIG / K8S_CONTEXT / K8S_NAMESPACE
+#   OPS_ENVIRONMENT / OPS_TOOLS_MODE / PROMETHEUS_URL / LOKI_URL
+#   KUBECONFIG / K8S_CONTEXT / K8S_NAMESPACE
+
+environment:
+  name: local
 
 tools:
   # real：必须连接真实组件，失败直接报错
@@ -9,11 +13,11 @@ tools:
   mode: auto
 
 prometheus:
-  base_url: "http://localhost:9090"   # 本地端口转发: kubectl port-forward svc/prometheus-server 9090:80
+  base_url: "http://localhost:9090"    # 外部环境地址优先由 PROMETHEUS_URL 注入
   timeout: 10
 
 loki:
-  base_url: "http://localhost:3100"   # 本地端口转发: kubectl port-forward svc/loki 3100:3100
+  base_url: "http://localhost:3100"    # 外部环境地址优先由 LOKI_URL 注入
   timeout: 15
   limit: 50                            # 单次返回日志条数上限
   lookback_minutes: 10                 # 查询时间窗口（分钟）

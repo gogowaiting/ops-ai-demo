@@ -23,16 +23,10 @@ from langgraph.graph.message import add_messages
 from langgraph.types import interrupt
 from typing_extensions import TypedDict
 
+from src.approval_audit import get_approval_audit
 from src.llm_client import call_llm
-from src.tools import (
-    get_pod_status,
-    query_loki_logs,
-    query_prometheus,
-    query_runbook,
-    restart_pod,
-    scale_deployment,
-    wiki_search,
-)
+from src.skill_registry import build_skill_context
+from src.tools import get_tool_registry
 
 MAX_ITERATIONS = 8  # 单轮工具调用上限，防止死循环
 
@@ -69,16 +63,9 @@ class AgentState(TypedDict):
     alert: dict
     iteration: int  # 每轮工具调用次数（无 reducer，按轮重置）
     approved: bool  # 非交互式审批标记
-
-
-# ---------- 交互式审批开关 ----------
-
-_interactive_approval: dict[str, bool] = {"enabled": False}
-
-
-def set_interactive_approval(enabled: bool) -> None:
-    """由对话入口开启：写操作通过 interrupt() 暂停等待人工确认。"""
-    _interactive_approval["enabled"] = enabled
+    interactive_approval: bool  # 仅对话链路使用 interrupt() 等待人工确认
+    approval_context: dict  # thread_id / alert_id / source / actor 等审计上下文
+    skill_context: dict  # 当前命中的 Skill、版本和工具白名单
 
 
 # ---------- 动作解析 ----------
@@ -86,19 +73,10 @@ def set_interactive_approval(enabled: bool) -> None:
 _ACTION_RE = re.compile(r"([A-Za-z_]\w*)\s*\((.*)\)")
 _KV_RE = re.compile(r"([A-Za-z_]\w*)\s*=\s*('[^']*'|\"[^\"]*\"|[^,)]+)")
 
-# 工具注册表：动作名 -> 可调用对象
-_TOOL_REGISTRY = {
-    "query_prometheus": query_prometheus,
-    "query_loki_logs": query_loki_logs,
-    "query_loki": query_loki_logs,  # 兼容 LLM 输出的短名
-    "get_pod_status": get_pod_status,
-    "query_runbook": query_runbook,
-    "wiki_search": wiki_search,
-    "restart_pod": restart_pod,
-    "scale_deployment": scale_deployment,
-}
-# 高危写操作：必须经审批门放行
-_WRITE_TOOLS = {"restart_pod", "scale_deployment"}
+# 工具注册表：支持内置工具和 Connector SDK 扩展
+_TOOL_REGISTRY = get_tool_registry()
+# 高危写操作：由工具元数据派生，必须经审批门放行
+_WRITE_TOOLS = _TOOL_REGISTRY.write_tools()
 
 
 def _coerce(value: str) -> Any:
@@ -125,18 +103,51 @@ def parse_action(text: str) -> tuple[str, dict]:
     return name, kwargs
 
 
-def _dispatch(name: str, kwargs: dict, approved: bool) -> str:
+def _dispatch(
+    name: str,
+    kwargs: dict,
+    approved: bool,
+    allowed_tools: set[str] | None = None,
+) -> str:
     """按注册表调度工具；写操作强制走审批门。"""
-    fn = _TOOL_REGISTRY.get(name)
-    if fn is None:
-        return f"未知动作: {name}"
-    if name in _WRITE_TOOLS:
-        # 安全护栏：忽略 LLM 自带的 approved 参数，以审批门状态为准
-        kwargs["approved"] = approved
-    try:
-        return fn(**kwargs)
-    except TypeError as exc:
-        return f"参数错误: {name}: {exc}"
+    if allowed_tools and name not in allowed_tools:
+        return f"当前 Skill 策略不允许执行工具: {name}"
+    return _TOOL_REGISTRY.dispatch(name, kwargs, approved=approved)
+
+
+def _record_write_approval(
+    state: AgentState,
+    name: str,
+    kwargs: dict,
+    *,
+    approved: bool,
+    decision: str,
+    actor: str,
+    actor_source: str,
+) -> None:
+    context = state.get("approval_context", {})
+    audit_args = {key: value for key, value in kwargs.items() if key != "approved"}
+    audit_skills = [
+        {
+            "id": skill.get("id", ""),
+            "version": skill.get("version", ""),
+            "content_hash": skill.get("content_hash", ""),
+            "source": skill.get("file", ""),
+        }
+        for skill in context.get("skills", [])
+    ]
+    get_approval_audit().record(
+        thread_id=str(context.get("thread_id", "")),
+        alert_id=str(context.get("alert_id", "")),
+        action=name,
+        args=audit_args,
+        decision=decision,
+        approved=approved,
+        actor=actor or "unknown",
+        actor_source=actor_source or "unknown",
+        source=str(context.get("source", "unknown")),
+        skills=audit_skills,
+    )
 
 
 # ---------- 图节点 ----------
@@ -154,13 +165,59 @@ def _execute_tools(state: AgentState) -> dict:
     last = state["messages"][-1].content if state["messages"] else ""
     action = last.split("ACTION:")[-1].strip() if "ACTION:" in last else ""
     name, kwargs = parse_action(action)
+    skill_context = state.get("skill_context", {})
+    allowed_tools = set(skill_context.get("allowed_tools") or [])
 
     approved = state.get("approved", False)
-    if name in _WRITE_TOOLS and not approved and _interactive_approval["enabled"]:
-        # 人工审批：图在此暂停，等待对话入口确认后 resume
-        approved = bool(interrupt({"action": name, "args": kwargs}))
+    interactive_approval = bool(state.get("interactive_approval", False))
+    if name in _WRITE_TOOLS:
+        decision = "blocked"
+        actor = "approval_gate"
+        actor_source = "system"
 
-    result = _dispatch(name, kwargs, approved=approved)
+        if interactive_approval and not approved:
+            # 人工审批：图在此暂停，等待对话入口返回结构化审批结果
+            resume = interrupt({"action": name, "args": kwargs})
+            if isinstance(resume, dict):
+                approved = bool(resume.get("approved", False))
+                decision = str(resume.get("decision") or ("approved" if approved else "rejected"))
+                actor = str(resume.get("actor") or "unknown")
+                actor_source = str(resume.get("actor_source") or "unknown")
+            else:
+                approved = bool(resume)
+                decision = "approved" if approved else "rejected"
+                actor_source = "legacy"
+        elif approved:
+            context = state.get("approval_context", {})
+            decision = "approved"
+            actor = str(context.get("actor") or "unknown")
+            actor_source = str(context.get("actor_source") or "caller")
+
+        try:
+            _record_write_approval(
+                state,
+                name,
+                kwargs,
+                approved=approved,
+                decision=decision,
+                actor=actor,
+                actor_source=actor_source,
+            )
+        except Exception as exc:  # noqa: BLE001 - 审计失败时禁止写操作
+            logger.exception("写操作 %s 的审批审计失败", name)
+            return {
+                "messages": [
+                    AIMessage(content=f"审批审计写入失败，已拒绝执行 {name}: {exc}")
+                ],
+                "iteration": MAX_ITERATIONS,
+            }
+
+    result = _dispatch(
+        name,
+        kwargs,
+        approved=approved,
+        allowed_tools=allowed_tools,
+    )
     if name in _WRITE_TOOLS and not approved:
         # 审批未通过：终止本轮，避免 LLM 对同一动作反复请求审批
         return {"messages": [AIMessage(content=result)], "iteration": MAX_ITERATIONS}
@@ -202,24 +259,46 @@ def get_chat_graph():
     return _chat_graph
 
 
-def run_agent(alert: dict, mode: str = "offline", approved: bool = False):
+def run_agent(
+    alert: dict,
+    mode: str = "offline",
+    approved: bool = False,
+    approved_by: str = "",
+    source: str = "single_run",
+):
     """生成器：逐轮产出诊断步骤（单次告警诊断，无会话记忆）。
 
     mode 含 "rag" 时在告警上下文中注入 wiki 检索指令，驱动 Agent 使用 LLM_WIKI；
     approved 为 False 时，写操作（重启/扩容）会被审批门拦截。
     """
-    set_interactive_approval(False)  # 单次诊断走参数审批，不启用交互暂停
-    prompt = f"告警: {alert}"
-    if "rag" in mode:
-        prompt += "\n请先完成只读诊断，再通过 wiki_search 检索运维知识库获取处置方案。"
-    initial_state: AgentState = {
-        "messages": [HumanMessage(content=prompt)],
-        "alert": alert,
-        "iteration": 0,
-        "approved": approved,
-    }
-    for event in _graph.stream(initial_state):
-        for node_name, output in event.items():
-            if "messages" in output:
-                for msg in output["messages"]:
-                    yield f"[{node_name}] {msg.content}"
+    if approved and not approved_by.strip():
+        raise ValueError("approved=True 时必须提供 approved_by")
+
+    def _stream():
+        prompt = f"告警: {alert}"
+        if "rag" in mode:
+            prompt += "\n请先完成只读诊断，再通过 wiki_search 检索运维知识库获取处置方案。"
+        skill_context = build_skill_context(prompt, alert=alert)
+        initial_state: AgentState = {
+            "messages": [HumanMessage(content=prompt)],
+            "alert": alert,
+            "iteration": 0,
+            "approved": approved,
+            "interactive_approval": False,
+            "skill_context": skill_context,
+            "approval_context": {
+                "thread_id": "",
+                "alert_id": str(alert.get("alert_id", "")),
+                "source": source,
+                "actor": approved_by,
+                "actor_source": "caller",
+                "skills": skill_context["skills"],
+            },
+        }
+        for event in _graph.stream(initial_state):
+            for node_name, output in event.items():
+                if "messages" in output:
+                    for msg in output["messages"]:
+                        yield f"[{node_name}] {msg.content}"
+
+    return _stream()

@@ -1,0 +1,188 @@
+"""写操作审批审计：记录谁在何时批准或拒绝了什么。"""
+
+from __future__ import annotations
+
+import json
+import os
+import sqlite3
+import threading
+from contextlib import contextmanager
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+from uuid import uuid4
+
+DEFAULT_AUDIT_DB = "data/approvals.sqlite"
+VALID_DECISIONS = {"approved", "rejected", "auto_approved", "blocked"}
+
+
+class ApprovalAuditStore:
+    """SQLite 审批审计存储，单进程内串行写入。"""
+
+    def __init__(self, db_path: str = DEFAULT_AUDIT_DB):
+        self.db_path = db_path
+        self._lock = threading.Lock()
+        self._initialize()
+
+    def _connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.db_path, timeout=5)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")
+        return conn
+
+    @contextmanager
+    def _connection(self):
+        conn = self._connect()
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
+
+    def _initialize(self) -> None:
+        if self.db_path != ":memory:":
+            Path(self.db_path).expanduser().parent.mkdir(parents=True, exist_ok=True)
+        with self._lock, self._connection() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS approval_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    event_id TEXT NOT NULL UNIQUE,
+                    thread_id TEXT NOT NULL DEFAULT '',
+                    alert_id TEXT NOT NULL DEFAULT '',
+                    action TEXT NOT NULL,
+                    args_json TEXT NOT NULL,
+                    decision TEXT NOT NULL,
+                    approved INTEGER NOT NULL,
+                    actor TEXT NOT NULL,
+                    actor_source TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    skills_json TEXT NOT NULL DEFAULT '[]',
+                    decided_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_approval_events_thread "
+                "ON approval_events(thread_id, id)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_approval_events_alert "
+                "ON approval_events(alert_id, id)"
+            )
+            columns = {
+                row["name"]
+                for row in conn.execute("PRAGMA table_info(approval_events)").fetchall()
+            }
+            if "skills_json" not in columns:
+                conn.execute(
+                    "ALTER TABLE approval_events "
+                    "ADD COLUMN skills_json TEXT NOT NULL DEFAULT '[]'"
+                )
+
+    def record(
+        self,
+        *,
+        action: str,
+        args: dict[str, Any],
+        decision: str,
+        approved: bool,
+        actor: str,
+        actor_source: str,
+        source: str,
+        thread_id: str = "",
+        alert_id: str = "",
+        skills: list[dict[str, Any]] | None = None,
+        event_id: str = "",
+    ) -> dict[str, Any]:
+        if decision not in VALID_DECISIONS:
+            raise ValueError(f"未知审批结果: {decision}")
+
+        normalized_actor = actor.strip()
+        if not normalized_actor:
+            raise ValueError("审批人不能为空")
+        normalized_action = action.strip()
+        if not normalized_action:
+            raise ValueError("审批动作不能为空")
+
+        record = {
+            "event_id": event_id or uuid4().hex,
+            "thread_id": thread_id.strip(),
+            "alert_id": alert_id.strip(),
+            "action": normalized_action,
+            "args": args,
+            "decision": decision,
+            "approved": bool(approved),
+            "actor": normalized_actor,
+            "actor_source": actor_source.strip() or "unknown",
+            "source": source.strip() or "unknown",
+            "skills": skills or [],
+            "decided_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+        }
+        args_json = json.dumps(args, ensure_ascii=False, sort_keys=True, default=str)
+        skills_json = json.dumps(
+            record["skills"], ensure_ascii=False, sort_keys=True, default=str
+        )
+
+        with self._lock, self._connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO approval_events (
+                    event_id, thread_id, alert_id, action, args_json, decision,
+                    approved, actor, actor_source, source, skills_json, decided_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    record["event_id"],
+                    record["thread_id"],
+                    record["alert_id"],
+                    record["action"],
+                    args_json,
+                    record["decision"],
+                    int(record["approved"]),
+                    record["actor"],
+                    record["actor_source"],
+                    record["source"],
+                    skills_json,
+                    record["decided_at"],
+                ),
+            )
+        return record
+
+    def list(self, limit: int = 50, thread_id: str = "") -> list[dict[str, Any]]:
+        normalized_limit = max(1, min(int(limit), 500))
+        sql = "SELECT * FROM approval_events"
+        params: tuple[Any, ...] = ()
+        if thread_id:
+            sql += " WHERE thread_id = ?"
+            params = (thread_id,)
+        sql += " ORDER BY id DESC LIMIT ?"
+        params += (normalized_limit,)
+
+        with self._lock, self._connection() as conn:
+            rows = conn.execute(sql, params).fetchall()
+
+        results = []
+        for row in rows:
+            item = dict(row)
+            item["args"] = json.loads(item.pop("args_json"))
+            item["skills"] = json.loads(item.pop("skills_json", "[]"))
+            item["approved"] = bool(item["approved"])
+            results.append(item)
+        return results
+
+
+_default_store: ApprovalAuditStore | None = None
+_default_lock = threading.Lock()
+
+
+def get_approval_audit() -> ApprovalAuditStore:
+    global _default_store
+    if _default_store is None:
+        with _default_lock:
+            if _default_store is None:
+                _default_store = ApprovalAuditStore(
+                    os.getenv("APPROVAL_AUDIT_DB", DEFAULT_AUDIT_DB)
+                )
+    return _default_store

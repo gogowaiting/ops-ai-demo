@@ -1,0 +1,121 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test (Conda ai)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash -el {0}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Create Conda environment
+        uses: conda-incubator/setup-miniconda@v3
+        with:
+          activate-environment: ai
+          python-version: "3.12"
+          auto-update-conda: false
+          auto-activate-base: false
+
+      - name: Cache pip downloads
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        run: conda run -n ai python -m pip install --upgrade pip && conda run -n ai python -m pip install -r requirements.txt
+
+      - name: Check dependency consistency
+        run: conda run -n ai python -m pip check
+
+      - name: Compile Python sources
+        run: conda run -n ai python -m compileall -q main.py src tests
+
+      - name: Run unit tests
+        run: conda run -n ai python -W error::ResourceWarning -m unittest discover -s tests -v
+
+      - name: Validate Compose configuration
+        run: docker compose config --quiet
+
+  image:
+    name: Build and smoke test image
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          push: false
+          tags: ops-ai-demo:${{ github.sha }}
+          build-args: |
+            APP_VERSION=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke test image
+        run: |
+          set -euo pipefail
+          docker run --detach --name ops-ai-ci --publish 18765:8765 "ops-ai-demo:${GITHUB_SHA}"
+          cleanup() {
+            docker rm --force ops-ai-ci >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent --show-error http://127.0.0.1:18765/healthz; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker logs ops-ai-ci
+          exit 1
+
+      - name: Export build artifacts
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          docker save "ops-ai-demo:${GITHUB_SHA}" | gzip > "dist/ops-ai-demo-${GITHUB_SHA}-linux-amd64.tar.gz"
+          tar --create --gzip \
+            --file "dist/ops-ai-demo-${GITHUB_SHA}-deploy.tar.gz" \
+            docker-compose.yaml \
+            config/model_config.yaml.example \
+            config/model_config.ollama.yaml.example \
+            config/ops_config.yaml \
+            deploy
+          sha256sum dist/* > dist/SHA256SUMS
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ops-ai-demo-${{ github.sha }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14

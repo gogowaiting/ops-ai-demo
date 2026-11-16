@@ -1,18 +1,26 @@
+# Agent 编排与模型客户端
 langgraph>=0.2
+langgraph-checkpoint>=2.0
+langgraph-checkpoint-sqlite>=2.0
+langchain-core>=0.3
 langchain-openai>=0.2
+typing-extensions>=4.12
+
+# RAG 与向量检索
 llama-index>=0.12
+llama-index-core>=0.12
 llama-index-llms-openai>=0.3
 llama-index-embeddings-openai>=0.3
-pyyaml>=6.0
-requests>=2.31
 
 # RAG 可配置向量库（rag.store=qdrant 时启用；local 模式不依赖）
 qdrant-client>=1.9
 llama-index-vector-stores-qdrant>=0.4
 
+# 配置与外部组件
+pyyaml>=6.0
+requests>=2.31
+
 # Web 服务（FastAPI + SSE）
 fastapi>=0.115
+pydantic>=2.7
 uvicorn>=0.30
-
-# 会话持久化（SqliteSaver checkpointer；未安装时自动降级 MemorySaver）
-langgraph-checkpoint-sqlite>=2.0

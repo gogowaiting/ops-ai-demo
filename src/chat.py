@@ -9,6 +9,8 @@
 
 from __future__ import annotations
 
+import getpass
+import os
 import sys
 import uuid
 from typing import Any
@@ -16,7 +18,8 @@ from typing import Any
 from langchain_core.messages import HumanMessage
 from langgraph.types import Command
 
-from src.agent import get_chat_graph, set_interactive_approval
+from src.agent import get_chat_graph
+from src.skill_registry import build_skill_context
 
 HELP_TEXT = """可用命令：
   /wiki <问题>      直接检索运维知识库（LLM_WIKI）
@@ -37,18 +40,37 @@ def _describe_action(value: Any) -> str:
     return str(value)
 
 
-def _confirm(value: Any, auto_approve: bool) -> bool:
-    """写操作人工确认；返回是否批准。"""
+def _operator_identity() -> tuple[str, str]:
+    configured = os.getenv("OPS_OPERATOR", "").strip()
+    if configured:
+        return configured, "environment"
+    return getpass.getuser(), "os_user"
+
+
+def _confirm(value: Any, auto_approve: bool) -> dict[str, Any]:
+    """写操作确认；返回可审计的结构化结果。"""
     desc = _describe_action(value)
+    actor, actor_source = _operator_identity()
     if auto_approve:
         print(f"[自动审批] 已批准: {desc}")
-        return True
+        return {
+            "approved": True,
+            "decision": "auto_approved",
+            "actor": actor,
+            "actor_source": actor_source,
+        }
     try:
         answer = input(f"[审批] 即将执行 {desc}，是否继续? [y/N]: ").strip().lower()
     except (EOFError, KeyboardInterrupt):
         print()
-        return False
-    return answer in {"y", "yes"}
+        answer = ""
+    approved = answer in {"y", "yes"}
+    return {
+        "approved": approved,
+        "decision": "approved" if approved else "rejected",
+        "actor": actor,
+        "actor_source": actor_source,
+    }
 
 
 def _print_event(event: dict) -> None:
@@ -63,11 +85,23 @@ def _print_event(event: dict) -> None:
 def run_turn(text: str, config: dict, auto_approve: bool) -> None:
     """执行一轮对话：流式输出；遇到审批中断则询问后 resume。"""
     graph = get_chat_graph()
+    thread_id = config["configurable"]["thread_id"]
+    skill_context = build_skill_context(text)
     payload: Any = {
         "messages": [HumanMessage(content=text)],
         "alert": {},
         "iteration": 0,  # 每轮重置工具调用计数
         "approved": False,
+        "interactive_approval": True,
+        "skill_context": skill_context,
+        "approval_context": {
+            "thread_id": thread_id,
+            "alert_id": "",
+            "source": "cli",
+            "actor": "",
+            "actor_source": "",
+            "skills": skill_context["skills"],
+        },
     }
     while True:
         pending = None
@@ -131,20 +165,22 @@ def _handle_command(line: str, config: dict, auto_approve: bool) -> tuple[bool, 
 
 def main() -> int:
     auto_approve = any(flag in sys.argv for flag in ("--auto-approve", "--yes"))
-    set_interactive_approval(True)  # 对话模式：写操作走 interrupt 人工确认
 
     try:
         from src.tools import get_tools_mode
+        from src.config_loader import resolve_ops_config
 
         tools_mode = get_tools_mode()
+        environment_name = resolve_ops_config()["environment_name"]
     except Exception:  # noqa: BLE001 - 工具层异常不应阻断对话入口
         tools_mode = "unknown"
+        environment_name = "unknown"
 
     config = {"configurable": {"thread_id": f"chat-{uuid.uuid4().hex[:8]}"}}
 
     print("=" * 48)
     print("运维智能体 · 对话模式（/help 查看命令，Ctrl+C 退出）")
-    print(f"工具模式: {tools_mode} | 自动审批: {'开' if auto_approve else '关'}")
+    print(f"环境: {environment_name} | 工具模式: {tools_mode} | 自动审批: {'开' if auto_approve else '关'}")
     print("=" * 48)
 
     while True:

@@ -10,9 +10,10 @@ except ImportError:
     yaml = None
 
 if yaml is not None:
-    from src.config_loader import resolve_model_config
+    from src.config_loader import resolve_model_config, resolve_ops_config
 else:
     resolve_model_config = None
+    resolve_ops_config = None
 
 
 @unittest.skipUnless(yaml is not None, "PyYAML is not installed")
@@ -72,6 +73,27 @@ class ResolveModelConfigTest(unittest.TestCase):
 
         self.assertEqual(cfg["llm_api_key"], "shared-key")
         self.assertEqual(cfg["embed_api_key"], "embedding-key")
+
+    def test_external_ops_environment_overrides(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "ops_config.yaml").write_text(
+                "environment:\n  name: local\n",
+                encoding="utf-8",
+            )
+            env = {
+                "OPS_ENVIRONMENT": "staging",
+                "PROMETHEUS_URL": "https://prometheus.staging.example",
+                "LOKI_URL": "https://loki.staging.example",
+            }
+            with patch.dict(os.environ, env, clear=True):
+                cfg = resolve_ops_config(temp_dir)
+
+        self.assertEqual(cfg["environment_name"], "staging")
+        self.assertEqual(
+            cfg["prometheus_base_url"], "https://prometheus.staging.example"
+        )
+        self.assertEqual(cfg["loki_base_url"], "https://loki.staging.example")
 
 
 if __name__ == "__main__":
