@@ -20,13 +20,19 @@ venv/
 *.log
 logs/
 *.sqlite
+*.sqlite-*
 *.db
 
 # 含密钥的本地配置（容器通过环境变量注入）
 config/model_config.yaml
 config/*.local.yaml
+.env
+.env.*
+!.env.example
 
 # 与运行时无关的资产
+.github/
+tests/
 deploy/
 READE.md
 docs/

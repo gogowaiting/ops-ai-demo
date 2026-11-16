@@ -65,11 +65,13 @@ def load_ops_config(config_dir: str = "config") -> dict[str, Any]:
     cfg = _load_yaml(Path(config_dir) / "ops_config.yaml")
 
     tools = cfg.get("tools", {})
+    environment = cfg.get("environment", {})
     prometheus = cfg.get("prometheus", {})
     loki = cfg.get("loki", {})
     k8s = cfg.get("kubernetes", {})
 
     return {
+        "environment_name": str(environment.get("name", "local") or "local"),
         "tools_mode": str(tools.get("mode", "auto")).lower(),
         "prometheus_base_url": prometheus.get("base_url", ""),
         "prometheus_timeout": float(prometheus.get("timeout", 10)),
@@ -88,6 +90,7 @@ def resolve_ops_config(config_dir: str = "config") -> dict[str, Any]:
     """加载运维组件配置并用环境变量覆盖（部署环境优先）。"""
     cfg = load_ops_config(config_dir)
 
+    cfg["environment_name"] = _env_or(cfg["environment_name"], "OPS_ENVIRONMENT")
     cfg["tools_mode"] = _env_or(cfg["tools_mode"], "OPS_TOOLS_MODE")
     cfg["prometheus_base_url"] = _env_or(cfg["prometheus_base_url"], "PROMETHEUS_URL")
     cfg["loki_base_url"] = _env_or(cfg["loki_base_url"], "LOKI_URL")

@@ -10,9 +10,12 @@ services:
     ports:
       - "${WEB_PORT:-8765}:8765"
     environment:
-      OPS_TOOLS_MODE: ${OPS_TOOLS_MODE:-auto}
-      PROMETHEUS_URL: http://prometheus:9090
-      LOKI_URL: http://loki:3100
+      OPS_ENVIRONMENT: ${OPS_ENVIRONMENT:-production}
+      OPS_TOOLS_MODE: ${OPS_TOOLS_MODE:-real}
+      OPS_DB_BACKEND: ${OPS_DB_BACKEND:-sqlite}
+      OPS_DB_URL: ${OPS_DB_URL:-}
+      PROMETHEUS_URL: ${PROMETHEUS_URL:-}
+      LOKI_URL: ${LOKI_URL:-}
       K8S_CONTEXT: ${K8S_CONTEXT:-docker-desktop}
       K8S_NAMESPACE: ${K8S_NAMESPACE:-default}
       # OpenAI：配置后走在线模型与在线向量化，留空则离线降级
@@ -24,8 +27,19 @@ services:
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434/v1}
       OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen3:8b}
       OLLAMA_EMBED_MODEL: ${OLLAMA_EMBED_MODEL:-bge-m3}
+      # 可选：配置后要求 Alertmanager webhook 携带 Bearer token
+      ALERT_WEBHOOK_TOKEN: ${ALERT_WEBHOOK_TOKEN:-}
+      OPS_WEB_AUTH_MODE: ${OPS_WEB_AUTH_MODE:-none}
+      OPS_WEB_API_TOKEN: ${OPS_WEB_API_TOKEN:-}
+      OPS_WEB_API_USER: ${OPS_WEB_API_USER:-}
+      OPS_WEB_API_ROLES: ${OPS_WEB_API_ROLES:-operator}
+      OPS_WEB_IDENTITY_HEADER: ${OPS_WEB_IDENTITY_HEADER:-X-User}
+      OPS_WEB_ROLES_HEADER: ${OPS_WEB_ROLES_HEADER:-X-Roles}
       # 会话 checkpoint 落盘（SqliteSaver），重启容器不丢会话与审批暂停态
       CHECKPOINT_DB: /app/data/checkpoints.sqlite
+      APPROVAL_AUDIT_DB: /app/data/approvals.sqlite
+      ALERT_JOB_DB: /app/data/alert_jobs.sqlite
+      DIAGNOSTIC_TRACE_DB: /app/data/traces.sqlite
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
@@ -36,25 +50,6 @@ services:
       # 宿主机 kubeconfig（只读），用于容器内操作 Docker Desktop 集群
       - ${HOME}/.kube:/home/app/.kube:ro
     restart: unless-stopped
-    depends_on:
-      - prometheus
-      - loki
-
-  prometheus:
-    image: prom/prometheus:v2.55.1
-    command:
-      - --config.file=/etc/prometheus/prometheus.yml
-      - --storage.tsdb.retention.time=6h
-    volumes:
-      - ./deploy/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-    ports:
-      - "${PROMETHEUS_PORT:-9090}:9090"
-
-  loki:
-    image: grafana/loki:3.2.1
-    command: ["-config.file=/etc/loki/local-config.yaml"]
-    ports:
-      - "${LOKI_PORT:-3100}:3100"
 
 volumes:
   rag_index:

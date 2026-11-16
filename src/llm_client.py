@@ -8,7 +8,7 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage, SystemMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 
-from src.config_loader import resolve_model_config
+from src.config_loader import resolve_model_config, resolve_ops_config
 
 _config = resolve_model_config()
 
@@ -19,6 +19,8 @@ Return exactly one action in this form:
 ACTION: tool_name(key='value', ...)
 
 Available tools:
+- check_environment()
+- cluster_snapshot(service='...')
 - query_prometheus(query='...')
 - query_loki_logs(service='...')
 - get_pod_status(service='...')
@@ -28,9 +30,34 @@ Available tools:
 - scale_deployment(service='...', replicas=3)
 
 Use wiki_search when the user asks for runbooks or remediation guidance.
+Maintain multi-turn context and combine metrics, logs, and Kubernetes evidence.
 When diagnosis is complete, return one concise conclusion instead of ACTION.
 Do not wrap the action in Markdown or include multiple actions.
 """
+
+
+def build_agent_system_prompt(skill_context: Mapping[str, Any] | None = None) -> str:
+    ops = resolve_ops_config()
+    context = (
+        "Current operations environment:\n"
+        f"- environment: {ops['environment_name']}\n"
+        f"- Kubernetes context: {ops['k8s_context'] or '(default)'}\n"
+        f"- Kubernetes namespace: {ops['k8s_namespace']}\n"
+        "- Prometheus and Loki are external data sources for this environment.\n"
+    )
+    skill_text = ""
+    active_skills = (skill_context or {}).get("skills", [])
+    if active_skills:
+        skill_text = "\nActive skills (follow these procedures):\n"
+        for skill in active_skills:
+            tools = ", ".join(skill.get("allowed_tools", []))
+            skill_text += (
+                f"\n### {skill.get('id')}@{skill.get('version')} "
+                f"(risk={skill.get('risk')})\n"
+                f"Allowed tools: {tools}\n"
+                f"{skill.get('body', '')}\n"
+            )
+    return f"{AGENT_SYSTEM_PROMPT}\n{context}{skill_text}"
 
 
 def _is_online_provider(provider: str, api_key: str) -> bool:
@@ -84,7 +111,14 @@ def call_llm(state: Mapping[str, Any]) -> dict:
     """LangGraph 节点：接收 state，返回新消息。"""
     messages: list[BaseMessage] = list(state.get("messages", []))
     model = get_chat_model()
-    response = model.invoke([SystemMessage(content=AGENT_SYSTEM_PROMPT), *messages])
+    response = model.invoke(
+        [
+            SystemMessage(
+                content=build_agent_system_prompt(state.get("skill_context"))
+            ),
+            *messages,
+        ]
+    )
     return {"messages": [response]}
 
 
@@ -180,6 +214,12 @@ def _offline_decision(history: str, last: str) -> str:
     # 阶段推进：以工具结果首行前缀判断当前进度（避免结果正文中的关键词误判）
     if last_lower.startswith("wiki 检索结果"):
         return "DONE: 依据知识库处置方案重启 Pod 并扩容，回查指标确认错误率回落"
+    if last_lower.startswith("环境检查"):
+        return "DONE: 环境检查完成，请结合上方连通性结果继续处理"
+    if last_lower.startswith("集群环境快照"):
+        if "oomkilled" in last_lower or "java.lang.outofmemoryerror" in last_lower:
+            return "DONE: 指标、日志和 Pod 状态共同指向 OOM，建议限制内存并处理异常进程"
+        return "DONE: 集群指标、日志和 Pod 状态联合检查完成"
     if last_lower.startswith("prometheus 查询结果"):
         return "ACTION: query_loki_logs(service='order-service')"
     if last_lower.startswith("loki 日志"):
@@ -192,6 +232,10 @@ def _offline_decision(history: str, last: str) -> str:
             return "DONE: 根因: OOM 导致 CrashLoopBackOff，建议重启 Pod 并临时扩容"
         return "DONE: 未发现明显异常，建议持续观察"
     # 首轮输入分发（支持中英文关键词，适配对话模式）
+    if "巡检" in last_lower or "集群快照" in last_lower or "cluster snapshot" in last_lower:
+        return "ACTION: cluster_snapshot(service='')"
+    if "连通性" in last_lower or "组件自检" in last_lower or "connectivity" in last_lower:
+        return "ACTION: check_environment()"
     if "cpu" in last_lower or "error" in last_lower or "指标" in last_lower:
         return "ACTION: query_prometheus(query='cpu and error rate')"
     if "log" in last_lower or "日志" in last_lower:

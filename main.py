@@ -1,7 +1,8 @@
 """Ops AI Demo 入口。
 
 用法：
-- python3 main.py           # 运行全部演示
+- python3 main.py           # 进入 CLI 对话模式
+- python3 main.py --demo    # 运行全部演示
 - python3 main.py --check   # 检测 Prometheus/Loki/Kubernetes 连通性
 - python3 main.py --chat    # 进入 CLI 对话模式（多轮记忆 + 写操作人工审批）
 - python3 main.py --web     # 启动 Web 对话界面（http://127.0.0.1:8765）
@@ -92,7 +93,7 @@ def _safe(func, name: str, need: str):
         return False
 
 
-def main():
+def run_demos():
     ok_agent = _safe(demo_agent, "Demo 1 Agent 诊断", "pip install langgraph langchain-openai")
     ok_rag = _safe(demo_rag, "Demo 2 RAG 问答", "pip install llama-index llama-index-llms-openai llama-index-embeddings-openai")
     ok_both = _safe(demo_agent_with_rag, "Demo 3 Agent+LLM_WIKI", "pip install langgraph langchain-openai llama-index")
@@ -128,15 +129,15 @@ def check_connectivity():
 
 
 if __name__ == "__main__":
-    if "--chat" in sys.argv:
-        from src.chat import main as chat_main
-
-        sys.exit(chat_main())
-    if "--web" in sys.argv:
+    if "--demo" in sys.argv:
+        run_demos()
+    elif "--web" in sys.argv:
         from src.web_server import main as web_main
 
         sys.exit(web_main())
-    if "--check" in sys.argv:
+    elif "--check" in sys.argv:
         check_connectivity()
     else:
-        main()
+        from src.chat import main as chat_main
+
+        sys.exit(chat_main())

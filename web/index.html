@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>运维智能体 · 对话控制台</title>
+<title>运维监控 Agent · 集群运维</title>
 <style>
   :root {
     --bg: #0e1116;
@@ -158,10 +158,11 @@
 </head>
 <body>
 <header>
-  <div class="title">运维智能体 <span>· 对话控制台</span></div>
+  <div class="title">运维监控 Agent <span>· 多轮集群运维</span></div>
   <button class="btn" id="btn-check">组件自检</button>
   <button class="btn" id="btn-new">新会话</button>
   <div class="badges">
+    <span class="badge" id="b-env">env: -</span>
     <span class="badge" id="b-tools">tools: -</span>
     <span class="badge" id="b-wiki">wiki: -</span>
     <span class="badge" id="b-llm">llm: -</span>
@@ -172,11 +173,12 @@
 
 <footer>
   <div class="chips">
-    <button class="chip" data-fill="order-service CPU 一直很高，帮我看看">诊断 CPU 告警</button>
-    <button class="chip" data-fill="帮我看看 order-service 的日志">查日志</button>
+    <button class="chip" data-fill="对当前集群做一次完整巡检">集群巡检</button>
+    <button class="chip" data-fill="order-service CPU 一直很高，结合指标、日志和 Pod 状态帮我诊断">智能诊断</button>
+    <button class="chip" data-fill="查看 order-service 最近的错误日志">查日志</button>
+    <button class="chip" data-fill="检查集群组件连通性">组件自检</button>
+    <button class="chip" data-fill="/wiki Pod CrashLoopBackOff 怎么办">知识库</button>
     <button class="chip" data-fill="重启 order-service">重启 Pod（需审批）</button>
-    <button class="chip" data-fill="/wiki Pod CrashLoopBackOff 怎么办">知识库检索</button>
-    <button class="chip" data-fill="/check">组件自检</button>
   </div>
   <div class="composer">
     <textarea id="input" placeholder="输入运维诉求，Enter 发送 / Shift+Enter 换行（支持 /wiki、/check、/reset）"></textarea>
@@ -191,9 +193,42 @@
   const input = document.getElementById('input');
   const sendBtn = document.getElementById('btn-send');
   let threadId = 'web-' + Math.random().toString(36).slice(2, 10);
+  let operator = '';
+  let webToken = '';
   let busy = false;
 
+  try {
+    operator = localStorage.getItem('opsai.operator') || '';
+    webToken = localStorage.getItem('opsai.web_token') || '';
+  } catch (_) {}
+
   const scroll = () => { log.scrollTop = log.scrollHeight; };
+
+  function authHeaders() {
+    return webToken ? { Authorization: 'Bearer ' + webToken } : {};
+  }
+
+  function ensureWebToken() {
+    if (webToken) return webToken;
+    const value = (window.prompt('请输入 Web API Token', '') || '').trim();
+    if (!value) return '';
+    webToken = value;
+    try {
+      localStorage.setItem('opsai.web_token', webToken);
+    } catch (_) {}
+    return webToken;
+  }
+
+  function ensureOperator() {
+    if (operator.trim()) return operator.trim();
+    const value = (window.prompt('请输入审批人标识（用于审计）', '') || '').trim();
+    if (!value) return '';
+    operator = value.slice(0, 120);
+    try {
+      localStorage.setItem('opsai.operator', operator);
+    } catch (_) {}
+    return operator;
+  }
 
   function addMessage(role, content, node) {
     const wrap = document.createElement('div');
@@ -246,10 +281,20 @@
     scroll();
 
     const decide = async (approve) => {
+      const actor = ensureOperator();
+      if (!actor) {
+        ok.disabled = no.disabled = false;
+        card.classList.remove('done');
+        return;
+      }
       ok.disabled = no.disabled = true;
       card.classList.add('done');
-      desc.textContent += approve ? '  → 已批准' : '  → 已拒绝';
-      await streamRequest('/api/resume', { thread_id: threadId, approve });
+      desc.textContent += (approve ? '  → 已批准' : '  → 已拒绝') + '（' + actor + '）';
+      await streamRequest('/api/resume', {
+        thread_id: threadId,
+        approve,
+        operator: actor,
+      });
     };
     ok.onclick = () => decide(true);
     no.onclick = () => decide(false);
@@ -273,7 +318,7 @@
     try {
       const res = await fetch(url, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
         body: JSON.stringify(body),
       });
       const ctype = res.headers.get('Content-Type') || '';
@@ -335,7 +380,7 @@
   async function runCheck() {
     addMessage('user', '/check');
     try {
-      const res = await fetch('/api/check');
+      const res = await fetch('/api/check', { headers: authHeaders() });
       const data = await res.json();
       addMessage('system', (data.lines || []).join('\n'));
     } catch (err) {
@@ -346,7 +391,9 @@
   async function runWiki(q) {
     addSystem('检索中…');
     try {
-      const res = await fetch('/api/wiki?q=' + encodeURIComponent(q));
+      const res = await fetch('/api/wiki?q=' + encodeURIComponent(q), {
+        headers: authHeaders(),
+      });
       const data = await res.json();
       if (data.error) return addSystem('[错误] ' + data.error, true);
       addMessage('assistant', data.answer, 'wiki:' + data.mode);
@@ -363,8 +410,18 @@
 
   async function loadStatus() {
     try {
-      const res = await fetch('/api/status');
+      const res = await fetch('/api/status', { headers: authHeaders() });
+      if (res.status === 401) {
+        webToken = '';
+        if (ensureWebToken()) return loadStatus();
+        addSystem('未提供 Web API Token', true);
+        return;
+      }
       const s = await res.json();
+      const bEnv = document.getElementById('b-env');
+      bEnv.textContent = 'env: ' + s.environment;
+      bEnv.className = 'badge on';
+
       const bTools = document.getElementById('b-tools');
       bTools.textContent = 'tools: ' + s.tools_mode;
       bTools.className = 'badge ' + (s.tools_mode === 'mock' ? 'off' : 'on');

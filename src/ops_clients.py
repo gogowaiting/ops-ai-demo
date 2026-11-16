@@ -205,5 +205,5 @@ class K8sClient:
         return f"已将 {service} 扩容至 {replicas} 副本"
 
     def check(self) -> str:
-        self._get_json("get", "ns", "-o", "json")
-        return "集群连接正常"
+        self._get_json("get", "pods", "-o", "json")
+        return "集群连接正常（命名空间内 Pod 可读）"

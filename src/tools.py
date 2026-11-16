@@ -13,6 +13,7 @@ from functools import lru_cache
 
 from src.config_loader import resolve_ops_config
 from src.ops_clients import ComponentError, K8sClient, LokiClient, PrometheusClient
+from src.tool_registry import ToolDefinition, ToolRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +33,32 @@ def _ops_config() -> dict:
 def get_tools_mode() -> str:
     """当前工具模式：real / mock / auto。"""
     return _ops_config()["tools_mode"]
+
+
+def check_environment() -> str:
+    """供 Agent 对话调用的环境连通性检查。"""
+    lines = [
+        "环境检查：",
+        *connectivity_check(),
+    ]
+    return "\n".join(lines)
+
+
+def cluster_snapshot(service: str = "") -> str:
+    """一次性采集统一环境中的指标、日志和 Pod 状态。"""
+    scope = service or "集群全局"
+    sections = [f"集群环境快照（{scope}）："]
+    collectors = [
+        ("Prometheus 指标", lambda: query_prometheus()),
+        ("Loki 日志", lambda: query_loki_logs(service=service)),
+        ("Kubernetes Pod", lambda: get_pod_status(service=service)),
+    ]
+    for title, collect in collectors:
+        try:
+            sections.append(f"\n--- {title} ---\n{collect()}")
+        except Exception as exc:  # noqa: BLE001 - 单个数据源失败不阻断其它证据
+            sections.append(f"\n--- {title} ---\n[FAIL] {type(exc).__name__}: {exc}")
+    return "\n".join(sections)
 
 
 def _degrade(name: str, exc: Exception) -> str:
@@ -236,7 +263,10 @@ def wiki_search(query: str = "", top_k: int = 0, service: str = "") -> str:
 def connectivity_check() -> list[str]:
     """逐项检测外部组件连通性（供 `main.py --check` 使用），不抛异常。"""
     cfg = _ops_config()
-    lines = [f"工具模式: {get_tools_mode()}"]
+    lines = [
+        f"环境: {cfg['environment_name']}",
+        f"工具模式: {get_tools_mode()}",
+    ]
 
     # Prometheus
     try:
@@ -267,3 +297,74 @@ def connectivity_check() -> list[str]:
         lines.append(f"  [FAIL] Kubernetes  context={cfg['k8s_context'] or '(默认)'}  {exc}")
 
     return lines
+
+
+# 工具元数据是 Skill 工具白名单和审批策略的唯一来源。
+_tool_registry = ToolRegistry()
+_tool_registry.register_many(
+    [
+        ToolDefinition("check_environment", "检查外部组件连通性", check_environment),
+        ToolDefinition(
+            "cluster_snapshot",
+            "聚合指标、日志和 Pod 状态",
+            cluster_snapshot,
+            input_schema={"service": "string"},
+        ),
+        ToolDefinition(
+            "query_prometheus",
+            "查询 Prometheus 指标",
+            query_prometheus,
+            input_schema={"query": "string"},
+        ),
+        ToolDefinition(
+            "query_loki_logs",
+            "查询 Loki 日志",
+            query_loki_logs,
+            input_schema={"service": "string"},
+        ),
+        ToolDefinition(
+            "query_loki",
+            "查询 Loki 日志的兼容名称",
+            query_loki_logs,
+            input_schema={"service": "string"},
+        ),
+        ToolDefinition(
+            "get_pod_status",
+            "查询 Kubernetes Pod 状态",
+            get_pod_status,
+            input_schema={"service": "string"},
+        ),
+        ToolDefinition(
+            "query_runbook",
+            "查询内置 Runbook",
+            query_runbook,
+            input_schema={"topic": "string"},
+        ),
+        ToolDefinition(
+            "wiki_search",
+            "检索 LLM_WIKI",
+            wiki_search,
+            input_schema={"query": "string", "top_k": "integer", "service": "string"},
+        ),
+        ToolDefinition(
+            "restart_pod",
+            "滚动重启 Deployment",
+            restart_pod,
+            risk="high",
+            write_op=True,
+            input_schema={"service": "string"},
+        ),
+        ToolDefinition(
+            "scale_deployment",
+            "调整 Deployment 副本数",
+            scale_deployment,
+            risk="high",
+            write_op=True,
+            input_schema={"service": "string", "replicas": "integer"},
+        ),
+    ]
+)
+
+
+def get_tool_registry() -> ToolRegistry:
+    return _tool_registry
