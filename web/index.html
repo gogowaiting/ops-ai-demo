@@ -1,0 +1,413 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>运维智能体 · 对话控制台</title>
+<style>
+  :root {
+    --bg: #0e1116;
+    --panel: #161a21;
+    --panel-2: #1d222b;
+    --line: #2a303b;
+    --text: #dfe4ec;
+    --muted: #8b95a5;
+    --accent: #4ea1ff;
+    --ok: #3ddc97;
+    --warn: #ffc857;
+    --err: #ff6b6b;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 14px/1.6 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+    display: flex;
+    flex-direction: column;
+  }
+  header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 18px;
+    background: var(--panel);
+    border-bottom: 1px solid var(--line);
+    flex-wrap: wrap;
+  }
+  header .title { font-weight: 600; letter-spacing: .3px; }
+  header .title span { color: var(--accent); }
+  .badges { display: flex; gap: 8px; flex-wrap: wrap; margin-left: auto; }
+  .badge {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    border: 1px solid var(--line);
+    background: var(--panel-2);
+    color: var(--muted);
+    white-space: nowrap;
+  }
+  .badge.on { color: var(--ok); border-color: #24543f; }
+  .badge.off { color: var(--warn); border-color: #5a4a1f; }
+  .btn {
+    font: inherit;
+    font-size: 13px;
+    padding: 5px 12px;
+    border-radius: 7px;
+    border: 1px solid var(--line);
+    background: var(--panel-2);
+    color: var(--text);
+    cursor: pointer;
+  }
+  .btn:hover { border-color: var(--accent); }
+  .btn:disabled { opacity: .45; cursor: not-allowed; }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #06101f; font-weight: 600; }
+  .btn.primary:hover { filter: brightness(1.08); }
+
+  main {
+    flex: 1;
+    overflow-y: auto;
+    padding: 20px 18px 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    scroll-behavior: smooth;
+  }
+  .msg { display: flex; flex-direction: column; gap: 4px; max-width: 860px; }
+  .msg.user { align-self: flex-end; align-items: flex-end; }
+  .msg .tag {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 11px;
+    color: var(--muted);
+    padding-left: 2px;
+  }
+  .bubble {
+    padding: 9px 13px;
+    border-radius: 10px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .msg.user .bubble { background: #1b3559; border-color: #2a5488; }
+  .msg.tool .bubble {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12.5px;
+    background: #12161c;
+    border-style: dashed;
+  }
+  .msg.system .bubble { background: #1a1f27; color: var(--muted); font-size: 13px; }
+  .bubble.err { border-color: #5a2626; color: var(--err); }
+
+  .approval {
+    align-self: flex-start;
+    max-width: 760px;
+    width: 100%;
+    border: 1px solid #6b5220;
+    background: #221d12;
+    border-radius: 10px;
+    padding: 12px 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .approval.done { opacity: .6; }
+  .approval-title { color: var(--warn); font-weight: 600; font-size: 13px; }
+  .approval-desc {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 13px;
+    color: #ffd98a;
+  }
+  .approval-actions { display: flex; gap: 8px; }
+
+  footer {
+    border-top: 1px solid var(--line);
+    background: var(--panel);
+    padding: 12px 18px 14px;
+  }
+  .chips { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
+  .chip {
+    font-size: 12px;
+    padding: 3px 10px;
+    border-radius: 999px;
+    border: 1px dashed var(--line);
+    background: transparent;
+    color: var(--muted);
+    cursor: pointer;
+  }
+  .chip:hover { color: var(--accent); border-color: var(--accent); }
+  .composer { display: flex; gap: 10px; align-items: flex-end; }
+  textarea {
+    flex: 1;
+    resize: none;
+    min-height: 46px;
+    max-height: 160px;
+    padding: 11px 13px;
+    border-radius: 9px;
+    border: 1px solid var(--line);
+    background: var(--panel-2);
+    color: var(--text);
+    font: inherit;
+    outline: none;
+  }
+  textarea:focus { border-color: var(--accent); }
+  .hint { margin-top: 6px; font-size: 12px; color: var(--muted); }
+</style>
+</head>
+<body>
+<header>
+  <div class="title">运维智能体 <span>· 对话控制台</span></div>
+  <button class="btn" id="btn-check">组件自检</button>
+  <button class="btn" id="btn-new">新会话</button>
+  <div class="badges">
+    <span class="badge" id="b-tools">tools: -</span>
+    <span class="badge" id="b-wiki">wiki: -</span>
+    <span class="badge" id="b-llm">llm: -</span>
+  </div>
+</header>
+
+<main id="log"></main>
+
+<footer>
+  <div class="chips">
+    <button class="chip" data-fill="order-service CPU 一直很高，帮我看看">诊断 CPU 告警</button>
+    <button class="chip" data-fill="帮我看看 order-service 的日志">查日志</button>
+    <button class="chip" data-fill="重启 order-service">重启 Pod（需审批）</button>
+    <button class="chip" data-fill="/wiki Pod CrashLoopBackOff 怎么办">知识库检索</button>
+    <button class="chip" data-fill="/check">组件自检</button>
+  </div>
+  <div class="composer">
+    <textarea id="input" placeholder="输入运维诉求，Enter 发送 / Shift+Enter 换行（支持 /wiki、/check、/reset）"></textarea>
+    <button class="btn primary" id="btn-send">发送</button>
+  </div>
+  <div class="hint">写操作（重启 / 扩容）会暂停等待你确认后执行；诊断过程实时流式输出。</div>
+</footer>
+
+<script>
+(() => {
+  const log = document.getElementById('log');
+  const input = document.getElementById('input');
+  const sendBtn = document.getElementById('btn-send');
+  let threadId = 'web-' + Math.random().toString(36).slice(2, 10);
+  let busy = false;
+
+  const scroll = () => { log.scrollTop = log.scrollHeight; };
+
+  function addMessage(role, content, node) {
+    const wrap = document.createElement('div');
+    wrap.className = 'msg ' + role;
+    if (node) {
+      const tag = document.createElement('div');
+      tag.className = 'tag';
+      tag.textContent = node;
+      wrap.appendChild(tag);
+    }
+    const bubble = document.createElement('div');
+    bubble.className = 'bubble';
+    bubble.textContent = content;
+    wrap.appendChild(bubble);
+    log.appendChild(wrap);
+    scroll();
+    return bubble;
+  }
+
+  function addSystem(text, isError) {
+    const bubble = addMessage('system', text);
+    if (isError) bubble.classList.add('err');
+  }
+
+  function approvalCard(ev) {
+    const card = document.createElement('div');
+    card.className = 'approval';
+
+    const title = document.createElement('div');
+    title.className = 'approval-title';
+    title.textContent = '需要人工审批（高危写操作）';
+
+    const desc = document.createElement('div');
+    desc.className = 'approval-desc';
+    const args = Object.entries(ev.args || {}).map(([k, v]) => k + '=' + v).join(', ');
+    desc.textContent = (ev.action || 'unknown') + '(' + args + ')';
+
+    const actions = document.createElement('div');
+    actions.className = 'approval-actions';
+    const ok = document.createElement('button');
+    ok.className = 'btn primary';
+    ok.textContent = '批准执行';
+    const no = document.createElement('button');
+    no.className = 'btn';
+    no.textContent = '拒绝';
+    actions.append(ok, no);
+
+    card.append(title, desc, actions);
+    log.appendChild(card);
+    scroll();
+
+    const decide = async (approve) => {
+      ok.disabled = no.disabled = true;
+      card.classList.add('done');
+      desc.textContent += approve ? '  → 已批准' : '  → 已拒绝';
+      await streamRequest('/api/resume', { thread_id: threadId, approve });
+    };
+    ok.onclick = () => decide(true);
+    no.onclick = () => decide(false);
+  }
+
+  function handleEvent(ev) {
+    if (ev.type === 'message') {
+      const role = ev.node === 'tools' ? 'tool' : 'assistant';
+      addMessage(role, ev.content, ev.node);
+    } else if (ev.type === 'approval') {
+      approvalCard(ev);
+    } else if (ev.type === 'error') {
+      addSystem('[错误] ' + ev.message, true);
+    }
+  }
+
+  async function streamRequest(url, body) {
+    if (busy) return;
+    busy = true;
+    sendBtn.disabled = true;
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const ctype = res.headers.get('Content-Type') || '';
+      if (!res.ok || !ctype.includes('text/event-stream')) {
+        const text = await res.text();
+        let msg = text;
+        try { msg = JSON.parse(text).error || text; } catch (_) {}
+        addSystem('[错误] ' + msg, true);
+        return;
+      }
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        let idx;
+        while ((idx = buffer.indexOf('\n\n')) >= 0) {
+          const chunk = buffer.slice(0, idx);
+          buffer = buffer.slice(idx + 2);
+          const line = chunk.split('\n').find((l) => l.startsWith('data: '));
+          if (!line) continue;
+          try { handleEvent(JSON.parse(line.slice(6))); } catch (_) {}
+        }
+      }
+    } catch (err) {
+      addSystem('[连接失败] ' + err.message, true);
+    } finally {
+      busy = false;
+      sendBtn.disabled = false;
+    }
+  }
+
+  async function send() {
+    const text = input.value.trim();
+    if (!text || busy) return;
+    input.value = '';
+    input.style.height = 'auto';
+
+    if (text === '/reset') {
+      clearSession();
+      return;
+    }
+    if (text === '/check') {
+      return runCheck();
+    }
+    if (text.startsWith('/wiki')) {
+      const q = text.slice(5).trim();
+      if (!q) return addSystem('/wiki 用法: /wiki <问题>');
+      addMessage('user', text);
+      return runWiki(q);
+    }
+
+    addMessage('user', text);
+    await streamRequest('/api/chat', { thread_id: threadId, text });
+  }
+
+  async function runCheck() {
+    addMessage('user', '/check');
+    try {
+      const res = await fetch('/api/check');
+      const data = await res.json();
+      addMessage('system', (data.lines || []).join('\n'));
+    } catch (err) {
+      addSystem('[错误] ' + err.message, true);
+    }
+  }
+
+  async function runWiki(q) {
+    addSystem('检索中…');
+    try {
+      const res = await fetch('/api/wiki?q=' + encodeURIComponent(q));
+      const data = await res.json();
+      if (data.error) return addSystem('[错误] ' + data.error, true);
+      addMessage('assistant', data.answer, 'wiki:' + data.mode);
+    } catch (err) {
+      addSystem('[错误] ' + err.message, true);
+    }
+  }
+
+  function clearSession() {
+    log.innerHTML = '';
+    threadId = 'web-' + Math.random().toString(36).slice(2, 10);
+    addSystem('已开启新会话');
+  }
+
+  async function loadStatus() {
+    try {
+      const res = await fetch('/api/status');
+      const s = await res.json();
+      const bTools = document.getElementById('b-tools');
+      bTools.textContent = 'tools: ' + s.tools_mode;
+      bTools.className = 'badge ' + (s.tools_mode === 'mock' ? 'off' : 'on');
+
+      const bWiki = document.getElementById('b-wiki');
+      bWiki.textContent = 'wiki: ' + s.wiki_mode;
+      bWiki.className = 'badge ' + (s.wiki_mode === 'rag' ? 'on' : 'off');
+
+      const bLlm = document.getElementById('b-llm');
+      bLlm.textContent = s.llm_offline
+        ? 'llm: 离线'
+        : 'llm: ' + s.llm_provider + ':' + s.llm_model;
+      bLlm.className = 'badge ' + (s.llm_offline ? 'off' : 'on');
+    } catch (err) {
+      addSystem('[状态获取失败] ' + err.message, true);
+    }
+  }
+
+  sendBtn.onclick = send;
+  document.getElementById('btn-check').onclick = runCheck;
+  document.getElementById('btn-new').onclick = clearSession;
+
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      send();
+    }
+  });
+  input.addEventListener('input', () => {
+    input.style.height = 'auto';
+    input.style.height = Math.min(input.scrollHeight, 160) + 'px';
+  });
+
+  document.querySelectorAll('.chip').forEach((chip) => {
+    chip.onclick = () => {
+      input.value = chip.dataset.fill || '';
+      input.focus();
+    };
+  });
+
+  addSystem('已连接。可以先试试「order-service CPU 一直很高，帮我看看」，或点击下方快捷指令。');
+  loadStatus();
+})();
+</script>
+</body>
+</html>

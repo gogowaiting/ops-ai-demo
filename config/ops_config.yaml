@@ -1,0 +1,41 @@
+# 运维组件 API 统一配置（本文件集中管理所有外部组件接入参数）
+# 所有字段均可用环境变量覆盖，便于容器/CI 部署：
+#   OPS_TOOLS_MODE / PROMETHEUS_URL / LOKI_URL / KUBECONFIG / K8S_CONTEXT / K8S_NAMESPACE
+
+tools:
+  # real：必须连接真实组件，失败直接报错
+  # mock：始终使用内置示例数据（离线演示）
+  # auto：优先真实组件，连接失败自动降级示例数据并标注 [降级]
+  mode: auto
+
+prometheus:
+  base_url: "http://localhost:9090"   # 本地端口转发: kubectl port-forward svc/prometheus-server 9090:80
+  timeout: 10
+
+loki:
+  base_url: "http://localhost:3100"   # 本地端口转发: kubectl port-forward svc/loki 3100:3100
+  timeout: 15
+  limit: 50                            # 单次返回日志条数上限
+  lookback_minutes: 10                 # 查询时间窗口（分钟）
+
+kubernetes:
+  kubeconfig: ""                       # 留空使用默认 ~/.kube/config
+  context: "docker-desktop"            # Docker Desktop 本地集群上下文
+  namespace: "default"
+  timeout: 15
+
+rag:
+  # 向量存储后端：
+  #   local  —— llama_index 内置 SimpleVectorStore，JSON 持久化（默认，零外部依赖）
+  #   qdrant —— Qdrant 向量库；qdrant.url 为空时走嵌入式本地模式（无需部署服务），
+  #             填 http://qdrant:6333 等地址则连接远程服务
+  store: local
+  collection: ops_wiki                 # qdrant 集合名
+  chunk_size: 512                      # 文档切分块大小（token）
+  chunk_overlap: 50                    # 相邻块重叠（保证上下文连续）
+  top_k: 3                             # 检索返回条数
+  persist_dir: ".rag_index"            # local 模式持久化目录（同时存放增量同步状态）
+  qdrant:
+    url: ""                            # 留空 = 嵌入式本地模式
+    path: ".rag_qdrant"                # 嵌入式模式持久化目录
+    api_key: ""

@@ -1,0 +1,61 @@
+name: ops-ai
+
+services:
+  ops-ai:
+    build:
+      context: .
+      args:
+        APP_VERSION: ${APP_VERSION:-0.3.0}
+    image: ops-ai-demo:${TAG:-dev}
+    ports:
+      - "${WEB_PORT:-8765}:8765"
+    environment:
+      OPS_TOOLS_MODE: ${OPS_TOOLS_MODE:-auto}
+      PROMETHEUS_URL: http://prometheus:9090
+      LOKI_URL: http://loki:3100
+      K8S_CONTEXT: ${K8S_CONTEXT:-docker-desktop}
+      K8S_NAMESPACE: ${K8S_NAMESPACE:-default}
+      # OpenAI：配置后走在线模型与在线向量化，留空则离线降级
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      EMBED_API_KEY: ${EMBED_API_KEY:-}
+      # Ollama：LLM_PROVIDER=ollama EMBED_PROVIDER=ollama docker compose up
+      LLM_PROVIDER: ${LLM_PROVIDER:-}
+      EMBED_PROVIDER: ${EMBED_PROVIDER:-}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434/v1}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen3:8b}
+      OLLAMA_EMBED_MODEL: ${OLLAMA_EMBED_MODEL:-bge-m3}
+      # 会话 checkpoint 落盘（SqliteSaver），重启容器不丢会话与审批暂停态
+      CHECKPOINT_DB: /app/data/checkpoints.sqlite
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      # 向量索引持久化，避免容器重建后重新向量化
+      - rag_index:/app/.rag_index
+      # 会话 checkpoint 持久化
+      - checkpoint_data:/app/data
+      # 宿主机 kubeconfig（只读），用于容器内操作 Docker Desktop 集群
+      - ${HOME}/.kube:/home/app/.kube:ro
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+      - loki
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=6h
+    volumes:
+      - ./deploy/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+
+  loki:
+    image: grafana/loki:3.2.1
+    command: ["-config.file=/etc/loki/local-config.yaml"]
+    ports:
+      - "${LOKI_PORT:-3100}:3100"
+
+volumes:
+  rag_index:
+  checkpoint_data:
